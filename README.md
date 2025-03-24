@@ -47,7 +47,7 @@ Install-Module -Name "PnP.PowerShell" -Force
 1. Run the script in PowerShell:
 
 ```powershell
-.\Report-EntraGroupPermissions.ps1
+.\SharePoint-EntraGroupsScanner-Full.ps1
 ```
 
 2. When prompted, enter:
