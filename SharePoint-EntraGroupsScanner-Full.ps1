@@ -18,12 +18,27 @@ $global:Report = @()
 
 # --- Define SharePoint system principals to exclude from summary ---
 $systemPrincipals = @(
+    # SharePoint system accounts
     "Everyone", 
     "Everyone except external users",
     "NT AUTHORITY\authenticated users",
     "NT AUTHORITY\LOCAL SERVICE",
     "Authenticated Users",
-    "SharePoint App"
+    "SharePoint App",
+    
+    # Microsoft 365 admin roles that are automatically provisioned
+    "Global Administrator",
+    "SharePoint Administrator",
+    "Exchange Administrator", 
+    "Teams Administrator",
+    "Security Administrator",
+    "Compliance Administrator",
+    "User Administrator",
+    "Billing Administrator",
+    "Power Platform Administrator",
+    "Dynamics 365 Administrator",
+    "Application Administrator",
+    "Global Reader"
 )
 
 # --- Function: Process-SharePointGroup ---
@@ -398,7 +413,7 @@ foreach ($site in $allSites) {
     Process-Web -WebUrl $site.Url -ObjectType "Site"
 }
 
-# --- Summary Report ---
+# --- Summary Report with Group-Centric Format ---
 Write-Host "`nFull Scan completed." -ForegroundColor Magenta
 
 if ($global:Report.Count -eq 0) {
@@ -408,75 +423,95 @@ if ($global:Report.Count -eq 0) {
     $filteredReport = $global:Report | Where-Object { 
         ($_.GroupType -ne "SharePointGroup" -and -not $_.IsSystemPrincipal) -or $_.SharePointGroupContainer -ne $null
     }
-    $siteGroupSummary = $filteredReport | Group-Object -Property WebUrl, WebTitle
+    
+    # Group by GroupName and GroupType instead of by site
+    $groupSummary = $filteredReport | Group-Object -Property GroupName, GroupType
 
-    Write-Host "`n📊 SUMMARY OF DISCOVERED ENTRA/SECURITY GROUP ASSIGNMENTS" -ForegroundColor Green
-    Write-Host "(SharePoint groups and system principals excluded from display)" -ForegroundColor Yellow
-    Write-Host "(Entra ID groups inside SharePoint groups ARE included)" -ForegroundColor Green
-    Write-Host "--------------------------------------------------"
+    # Create clean header with border
+    $headerWidth = 80
+    $border = "-" * $headerWidth
+    
+    Write-Host "`nENTRA GROUP ASSIGNMENTS SUMMARY" -NoNewline -ForegroundColor White
+    Write-Host "".PadRight(26) -NoNewline
+    Write-Host "[Filtered: SP Groups excluded]" -ForegroundColor Yellow
+    Write-Host $border -ForegroundColor DarkGray
 
-    if ($siteGroupSummary.Count -eq 0) {
+    if ($groupSummary.Count -eq 0) {
         Write-Host "`nNo Entra ID or Security groups found - only SharePoint groups or system principals were detected." -ForegroundColor Cyan
     } else {
-        foreach ($siteGroup in $siteGroupSummary) {
-            # Extract WebUrl and WebTitle from the Name property
-            $siteParts = $siteGroup.Name -split ', '
-            $webUrl = $siteParts[0].Trim()
-            $webTitle = $siteParts[1].Trim()
+        # Add legend at the top
+        Write-Host "LEGEND: [M]=M365/EntraID Group, [S]=Security Group, [SP]=SharePoint Group" -ForegroundColor White
+        Write-Host ""
+        
+        foreach ($groupEntry in $groupSummary) {
+            # Extract GroupName and GroupType from the Name property
+            $groupParts = $groupEntry.Name -split ', '
+            $groupName = $groupParts[0].Trim()
+            $groupType = $groupParts[1].Trim()
             
-            Write-Host "`n$webTitle" -ForegroundColor Cyan
-            
-            # Get unique groups for this site
-            $siteGroups = $siteGroup.Group | Group-Object -Property GroupName
-            
-            foreach ($group in $siteGroups) {
-                $groupName = $group.Name
-                # Get the group type from first instance
-                $groupTypeObj = $group.Group | Select-Object -First 1
-                $groupType = $groupTypeObj.GroupType
-                
-                # UPDATED: Improved formatting with color-coding for clearer distinction
-                Write-Host "  • Group: " -NoNewline -ForegroundColor White
-                Write-Host "'$groupName'" -NoNewline -ForegroundColor Yellow
-                Write-Host " | Type: " -NoNewline -ForegroundColor White
-                Write-Host $groupType -NoNewline -ForegroundColor Cyan
-                Write-Host " | $($group.Group.Count) instances" -ForegroundColor White
-                
-                # Now list all the locations where this group is found
-                foreach ($location in $group.Group) {
-                    $locationInfo = $location.ObjectType
-                    $permissionInfo = $location.Permissions
-                    
-                    # If found inside a SharePoint group, include that information
-                    if ($location.SharePointGroupContainer -ne $null) {
-                        Write-Host ("    - Location: {0} - In SharePoint Group: {1} - Permissions: {2}" -f 
-                            $locationInfo, $location.SharePointGroupContainer, $permissionInfo) -ForegroundColor Gray
-                    } else {
-                        Write-Host ("    - Location: {0} - Permissions: {1}" -f $locationInfo, $permissionInfo) -ForegroundColor Gray
-                    }
-                }
+            # Set type code based on group type
+            $typeCode = switch ($groupType) {
+                "M365/EntraIDGroup" { "[M]" }
+                "SecurityGroup" { "[S]" }
+                "SharePointGroup" { "[SP]" }
+                default { "[?]" }
             }
+            
+            # Display group information as header
+            Write-Host "GROUP: '$groupName' $typeCode - $($groupEntry.Group.Count) total instances" -ForegroundColor Yellow
+            Write-Host $border -ForegroundColor DarkGray
+            
+            # Display LOCATIONS header
+            Write-Host "LOCATIONS:" -ForegroundColor White
+            
+            # Display all locations where this group is found
+            foreach ($location in $groupEntry.Group) {
+                $siteInfo = $location.WebTitle
+                $locationInfo = $location.ObjectType
+                
+                # Format location info with site context
+                $locationDisplay = "• $siteInfo | $locationInfo"
+                
+                # If found inside a SharePoint group, add that information
+                if ($location.SharePointGroupContainer -ne $null) {
+                    $locationDisplay += " (via SP Group: $($location.SharePointGroupContainer))"
+                }
+                
+                Write-Host $locationDisplay -ForegroundColor White
+            }
+            
+            # Add border after each group's locations
+            Write-Host $border -ForegroundColor DarkGray
+            Write-Host ""
         }
     }
 
-    Write-Host "--------------------------------------------------"
-    Write-Host "Note: SharePoint groups themselves and system principals are excluded from display." -ForegroundColor Yellow
-
-    # Group type summary - only for non-system principals
+    # Group type summary statistics
     $filteredForSummary = $global:Report | Where-Object { -not $_.IsSystemPrincipal -and $_.GroupType -ne "SharePointGroup" }
     $groupTypeSummary = $filteredForSummary | Group-Object -Property GroupType | Select-Object Name, Count
-    Write-Host "`nSummary by group type (excluding system principals):" -ForegroundColor Green
+    
+    Write-Host "SUMMARY STATISTICS:" -ForegroundColor White
     $groupTypeSummary | ForEach-Object {
-        Write-Host ("Type: {0} | Count: {1}" -f $_.Name, $_.Count) -ForegroundColor White
+        # Set type code based on group type
+        $typeCode = switch ($_.Name) {
+            "M365/EntraIDGroup" { "[M]" }
+            "SecurityGroup" { "[S]" }
+            "SharePointGroup" { "[SP]" }
+            default { "[?]" }
+        }
+        Write-Host ("• {0} {1}: {2} instances" -f $typeCode, $_.Name, $_.Count) -ForegroundColor White
     }
     
     # Count of groups found inside SharePoint groups
     $nestedGroupCount = ($global:Report | Where-Object { $_.SharePointGroupContainer -ne $null }).Count
-    Write-Host "`nEntra ID/Security groups found inside SharePoint groups: $nestedGroupCount" -ForegroundColor Green
+    Write-Host "• Entra ID/Security groups inside SharePoint groups: $nestedGroupCount" -ForegroundColor White
     
     # Report on excluded system principals
     $systemPrincipalCount = ($global:Report | Where-Object { $_.IsSystemPrincipal }).Count
-    Write-Host "Excluded system principals: $systemPrincipalCount instances" -ForegroundColor Yellow
+    Write-Host "• Excluded system principals: $systemPrincipalCount" -ForegroundColor White
+    
+    # Note about permissions in CSV
+    Write-Host "`nNOTE: Permissions details are included in CSV export but omitted from display" -ForegroundColor Yellow
 }
 
 # --- Optionally save the detailed report to CSV ---

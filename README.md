@@ -21,6 +21,7 @@ A comprehensive PowerShell tool for reporting Microsoft 365 (Entra ID) groups an
 - [Usage](#-usage)
 - [How It Works](#-how-it-works)
 - [Output Explanation](#-output-explanation)
+- [Excluded System Principals](#-excluded-system-principals)
 - [Troubleshooting](#-troubleshooting)
 - [Limitations](#-limitations)
 - [License](#-license)
@@ -46,7 +47,7 @@ During tenant migrations, understanding how groups are applied across your Share
 | 📊 **Visual Progress** | Uses color-coded output and progress bars to track scanning progress |
 | 📂 **CSV Export** | Exports detailed findings for documentation and further analysis |
 | 🔄 **Nested Group Detection** | Identifies Entra ID groups nested inside SharePoint groups |
-| 🛡️ **System Principal Filtering** | Excludes system principals from reports for cleaner output |
+| 🛡️ **System Principal Filtering** | Excludes system principals and admin roles from reports for cleaner migration planning |
 
 ## 📋 Prerequisites
 
@@ -142,6 +143,41 @@ The script generates a report with the following information:
 | **Permissions** | The permission levels assigned to the group (e.g., "Full Control; Design; Edit") |
 | **IsSystemPrincipal** | Indicates if this is a system principal (excluded from summary display) |
 | **SharePointGroupContainer** | If the group is nested within a SharePoint group, this shows the container group name |
+
+## 🔒 Excluded System Principals
+
+The script automatically excludes certain system principals and admin roles from the report to provide cleaner output that focuses on groups that actually need to be migrated between tenants. These excluded items include:
+
+### SharePoint System Principals
+- Everyone
+- Everyone except external users
+- NT AUTHORITY\authenticated users
+- NT AUTHORITY\LOCAL SERVICE
+- Authenticated Users
+- SharePoint App
+
+### Microsoft 365 Admin Roles
+- Global Administrator
+- SharePoint Administrator
+- Exchange Administrator
+- Teams Administrator
+- Security Administrator
+- Compliance Administrator
+- User Administrator
+- Billing Administrator
+- Power Platform Administrator
+- Dynamics 365 Administrator
+- Application Administrator
+- Global Reader
+
+**Why are these excluded?** 
+- System principals are automatically created in every SharePoint environment
+- Admin roles represent claims-based identities that are auto-provisioned in the destination tenant
+- These principals appear in SharePoint with special identifiers (e.g., `c:0t.c|tenant|[GUID]`)
+- They don't need to be migrated as part of tenant-to-tenant migrations
+- Excluding them provides cleaner, more actionable reports focused on actual groups that need migration planning
+
+The script counts these excluded principals separately in the summary statistics.
 
 ## 🔧 Troubleshooting
 
