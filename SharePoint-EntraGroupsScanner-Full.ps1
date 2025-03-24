@@ -299,9 +299,13 @@ if ($global:Report.Count -eq 0) {
     
     Write-Host "`nSummary of discovered group assignments:" -ForegroundColor Green
     $uniqueGroupSummary | ForEach-Object {
-        # Get the group type from the first occurrence
-        $groupType = ($global:Report | Where-Object { $_.GroupName -eq $_.Name } | Select-Object -First 1).GroupType
-        Write-Host ("Group: {0} | Type: {1} | Occurrences: {2}" -f $_.Name, $groupType, $_.Count) `
+        # Store the current group name from uniqueGroupSummary
+        $groupName = $_.Name
+        
+        # Get the group type from the first occurrence in the report where GroupName matches
+        $groupType = ($global:Report | Where-Object { $_.GroupName -eq $groupName } | Select-Object -First 1).GroupType
+        
+        Write-Host ("Group: {0} | Type: {1} | Occurrences: {2}" -f $groupName, $groupType, $_.Count) `
             -ForegroundColor White
     }
     
