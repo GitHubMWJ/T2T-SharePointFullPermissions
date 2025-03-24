@@ -129,6 +129,14 @@ function Process-Web {
         
         Write-Host "  Retrieved web object successfully" -ForegroundColor DarkGray
         
+        # FIX: Handle empty web titles by using URL as fallback
+        $webTitle = if ([string]::IsNullOrEmpty($web.Title)) {
+            # Use URL as fallback if title is empty (for system sites)
+            "System Site: " + $WebUrl.TrimEnd('/').Split('/')[-1]
+        } else {
+            $web.Title
+        }
+        
         # Process role assignments directly
         if ($web.RoleAssignments -ne $null) {
             Write-Host "  Found $($web.RoleAssignments.Count) role assignments" -ForegroundColor DarkGray
@@ -184,7 +192,7 @@ function Process-Web {
                             
                             $global:Report += [PSCustomObject]@{
                                 WebUrl                 = $WebUrl
-                                WebTitle               = $web.Title
+                                WebTitle               = $webTitle   # Use the fixed webTitle here
                                 ObjectType             = $ObjectType
                                 GroupName              = $displayName
                                 GroupType              = $groupType
@@ -196,7 +204,7 @@ function Process-Web {
                             
                             # If this is a SharePoint group, examine its members for Entra ID groups
                             if ($groupType -eq "SharePointGroup") {
-                                Process-SharePointGroup -WebUrl $WebUrl -WebTitle $web.Title -ObjectType $ObjectType `
+                                Process-SharePointGroup -WebUrl $WebUrl -WebTitle $webTitle -ObjectType $ObjectType `
                                     -SPGroupName $displayName -Permissions $permissions
                             }
                         }
@@ -268,7 +276,7 @@ function Process-Web {
                                 
                                 $global:Report += [PSCustomObject]@{
                                     WebUrl                 = $WebUrl
-                                    WebTitle               = $web.Title
+                                    WebTitle               = $webTitle   # Use the fixed webTitle here
                                     ObjectType             = "List: $($list.Title)"
                                     GroupName              = $displayName
                                     GroupType              = $groupType
@@ -280,7 +288,7 @@ function Process-Web {
                                 
                                 # If this is a SharePoint group, examine its members for Entra ID groups
                                 if ($groupType -eq "SharePointGroup") {
-                                    Process-SharePointGroup -WebUrl $WebUrl -WebTitle $web.Title -ObjectType "List: $($list.Title)" `
+                                    Process-SharePointGroup -WebUrl $WebUrl -WebTitle $webTitle -ObjectType "List: $($list.Title)" `
                                         -SPGroupName $displayName -Permissions $permissions
                                 }
                             }
