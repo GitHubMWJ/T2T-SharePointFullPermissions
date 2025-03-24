@@ -16,6 +16,86 @@ if (-not (Get-Module -Name "PnP.PowerShell")) {
 # --- Global variable to hold the report data ---
 $global:Report = @()
 
+# --- Define SharePoint system principals to exclude from summary ---
+$systemPrincipals = @(
+    "Everyone", 
+    "Everyone except external users",
+    "NT AUTHORITY\authenticated users",
+    "NT AUTHORITY\LOCAL SERVICE",
+    "Authenticated Users",
+    "SharePoint App"
+)
+
+# --- Function: Process-SharePointGroup ---
+# Processes a SharePoint group to find Entra ID groups inside it
+function Process-SharePointGroup {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$WebUrl,
+        [Parameter(Mandatory = $true)]
+        [string]$WebTitle,
+        [Parameter(Mandatory = $true)]
+        [string]$ObjectType,
+        [Parameter(Mandatory = $true)]
+        [string]$SPGroupName,
+        [Parameter(Mandatory = $true)]
+        [string]$Permissions
+    )
+    
+    try {
+        Write-Host "    Examining SharePoint group members: $SPGroupName" -ForegroundColor DarkGray
+        
+        # Get members of the SharePoint group
+        $groupMembers = Get-PnPGroupMember -Identity $SPGroupName -ErrorAction Stop
+        
+        if ($null -eq $groupMembers -or $groupMembers.Count -eq 0) {
+            Write-Host "      No members found in SharePoint group" -ForegroundColor DarkGray
+            return
+        }
+        
+        Write-Host "      Found $($groupMembers.Count) members in SharePoint group" -ForegroundColor DarkGray
+        
+        foreach ($member in $groupMembers) {
+            # Check if this member is an Entra ID/Security group
+            if ($member.PrincipalType -eq "SecurityGroup") {
+                $groupType = "Unknown"
+                                
+                # Check for Microsoft 365 Group vs Security Group
+                if ($member.LoginName -match "c:0t\.c\|tenant\|") {
+                    $groupType = "M365/EntraIDGroup"
+                } else {
+                    $groupType = "SecurityGroup"
+                }
+                
+                # Skip system principals
+                $isSystemPrincipal = $systemPrincipals -contains $member.Title
+                if ($isSystemPrincipal) {
+                    Write-Host "      Skipping system principal: $($member.Title)" -ForegroundColor DarkGray
+                    continue
+                }
+                
+                Write-Host "      Found Entra/Security group in SP group: $($member.Title)" -ForegroundColor White
+                
+                # Add to report with indicator it's in a SharePoint group
+                $global:Report += [PSCustomObject]@{
+                    WebUrl           = $WebUrl
+                    WebTitle         = $WebTitle
+                    ObjectType       = $ObjectType
+                    GroupName        = $member.Title
+                    GroupType        = $groupType
+                    LoginName        = $member.LoginName
+                    Permissions      = $Permissions
+                    IsSystemPrincipal = $false
+                    SharePointGroupContainer = $SPGroupName
+                }
+            }
+        }
+    }
+    catch {
+        Write-Host "    Error processing SharePoint group members: $_" -ForegroundColor Red
+    }
+}
+
 # --- Function: Process-Web ---
 # Recursively processes a SharePoint web (site or subsite) and its lists.
 function Process-Web {
@@ -99,14 +179,25 @@ function Process-Web {
                             $roleBindings = Get-PnPProperty -ClientObject $roleAssignment -Property RoleDefinitionBindings
                             $permissions = ($roleBindings | ForEach-Object { $_.Name }) -join "; "
                             
+                            # Add a flag to identify SharePoint system principals
+                            $isSystemPrincipal = $systemPrincipals -contains $displayName
+                            
                             $global:Report += [PSCustomObject]@{
-                                WebUrl      = $WebUrl
-                                WebTitle    = $web.Title
-                                ObjectType  = $ObjectType
-                                GroupName   = $displayName
-                                GroupType   = $groupType
-                                LoginName   = $member.LoginName
-                                Permissions = $permissions
+                                WebUrl                 = $WebUrl
+                                WebTitle               = $web.Title
+                                ObjectType             = $ObjectType
+                                GroupName              = $displayName
+                                GroupType              = $groupType
+                                LoginName              = $member.LoginName
+                                Permissions            = $permissions
+                                IsSystemPrincipal      = $isSystemPrincipal
+                                SharePointGroupContainer = $null
+                            }
+                            
+                            # If this is a SharePoint group, examine its members for Entra ID groups
+                            if ($groupType -eq "SharePointGroup") {
+                                Process-SharePointGroup -WebUrl $WebUrl -WebTitle $web.Title -ObjectType $ObjectType `
+                                    -SPGroupName $displayName -Permissions $permissions
                             }
                         }
                     } else {
@@ -172,14 +263,25 @@ function Process-Web {
                                 $roleBindings = Get-PnPProperty -ClientObject $roleAssignment -Property RoleDefinitionBindings
                                 $permissions = ($roleBindings | ForEach-Object { $_.Name }) -join "; "
                                 
+                                # Add a flag to identify SharePoint system principals
+                                $isSystemPrincipal = $systemPrincipals -contains $displayName
+                                
                                 $global:Report += [PSCustomObject]@{
-                                    WebUrl      = $WebUrl
-                                    WebTitle    = $web.Title
-                                    ObjectType  = "List: $($list.Title)"
-                                    GroupName   = $displayName
-                                    GroupType   = $groupType
-                                    LoginName   = $member.LoginName
-                                    Permissions = $permissions
+                                    WebUrl                 = $WebUrl
+                                    WebTitle               = $web.Title
+                                    ObjectType             = "List: $($list.Title)"
+                                    GroupName              = $displayName
+                                    GroupType              = $groupType
+                                    LoginName              = $member.LoginName
+                                    Permissions            = $permissions
+                                    IsSystemPrincipal      = $isSystemPrincipal
+                                    SharePointGroupContainer = $null
+                                }
+                                
+                                # If this is a SharePoint group, examine its members for Entra ID groups
+                                if ($groupType -eq "SharePointGroup") {
+                                    Process-SharePointGroup -WebUrl $WebUrl -WebTitle $web.Title -ObjectType "List: $($list.Title)" `
+                                        -SPGroupName $displayName -Permissions $permissions
                                 }
                             }
                         }
@@ -294,30 +396,74 @@ Write-Host "`nFull Scan completed." -ForegroundColor Magenta
 if ($global:Report.Count -eq 0) {
     Write-Host "No group permissions found in the scanned sites." -ForegroundColor Yellow
 } else {
-    $uniqueGroupSummary = $global:Report | Group-Object -Property GroupName | `
-        Select-Object Name, Count
-    
-    Write-Host "`nSummary of discovered group assignments:" -ForegroundColor Green
-    $uniqueGroupSummary | ForEach-Object {
-        # Store the current group name from uniqueGroupSummary
-        $groupName = $_.Name
-        
-        # Get the group type from the first occurrence in the report where GroupName matches
-        $groupType = ($global:Report | Where-Object { $_.GroupName -eq $groupName } | Select-Object -First 1).GroupType
-        
-        Write-Host ("Group: {0} | Type: {1} | Occurrences: {2}" -f $groupName, $groupType, $_.Count) `
-            -ForegroundColor White
+    # Filter out SharePoint groups and system principals, but keep Entra ID groups found inside SharePoint groups
+    $filteredReport = $global:Report | Where-Object { 
+        ($_.GroupType -ne "SharePointGroup" -and -not $_.IsSystemPrincipal) -or $_.SharePointGroupContainer -ne $null
     }
-    
-    # Group type summary
-    $groupTypeSummary = $global:Report | Group-Object -Property GroupType | `
-        Select-Object Name, Count
-    
-    Write-Host "`nSummary by group type:" -ForegroundColor Green
+    $siteGroupSummary = $filteredReport | Group-Object -Property WebUrl, WebTitle
+
+    Write-Host "`n📊 SUMMARY OF DISCOVERED ENTRA/SECURITY GROUP ASSIGNMENTS" -ForegroundColor Green
+    Write-Host "(SharePoint groups and system principals excluded from display)" -ForegroundColor Yellow
+    Write-Host "(Entra ID groups inside SharePoint groups ARE included)" -ForegroundColor Green
+    Write-Host "--------------------------------------------------"
+
+    if ($siteGroupSummary.Count -eq 0) {
+        Write-Host "`nNo Entra ID or Security groups found - only SharePoint groups or system principals were detected." -ForegroundColor Cyan
+    } else {
+        foreach ($siteGroup in $siteGroupSummary) {
+            # Extract WebUrl and WebTitle from the Name property
+            $siteParts = $siteGroup.Name -split ', '
+            $webUrl = $siteParts[0].Trim()
+            $webTitle = $siteParts[1].Trim()
+            
+            Write-Host "`n$webTitle" -ForegroundColor Cyan
+            
+            # Get unique groups for this site
+            $siteGroups = $siteGroup.Group | Group-Object -Property GroupName
+            
+            foreach ($group in $siteGroups) {
+                $groupName = $group.Name
+                # Get the group type from first instance
+                $groupTypeObj = $group.Group | Select-Object -First 1
+                $groupType = $groupTypeObj.GroupType
+                
+                Write-Host ("  • {0} ({1}) ({2} instances)" -f $groupName, $groupType, $group.Group.Count) -ForegroundColor White
+                
+                # Now list all the locations where this group is found
+                foreach ($location in $group.Group) {
+                    $locationInfo = $location.ObjectType
+                    $permissionInfo = $location.Permissions
+                    
+                    # If found inside a SharePoint group, include that information
+                    if ($location.SharePointGroupContainer -ne $null) {
+                        Write-Host ("    - Location: {0} - In SharePoint Group: {1} - Permissions: {2}" -f 
+                            $locationInfo, $location.SharePointGroupContainer, $permissionInfo) -ForegroundColor Gray
+                    } else {
+                        Write-Host ("    - Location: {0} - Permissions: {1}" -f $locationInfo, $permissionInfo) -ForegroundColor Gray
+                    }
+                }
+            }
+        }
+    }
+
+    Write-Host "--------------------------------------------------"
+    Write-Host "Note: SharePoint groups themselves and system principals are excluded from display." -ForegroundColor Yellow
+
+    # Group type summary - only for non-system principals
+    $filteredForSummary = $global:Report | Where-Object { -not $_.IsSystemPrincipal -and $_.GroupType -ne "SharePointGroup" }
+    $groupTypeSummary = $filteredForSummary | Group-Object -Property GroupType | Select-Object Name, Count
+    Write-Host "`nSummary by group type (excluding system principals):" -ForegroundColor Green
     $groupTypeSummary | ForEach-Object {
-        Write-Host ("Type: {0} | Count: {1}" -f $_.Name, $_.Count) `
-            -ForegroundColor White
+        Write-Host ("Type: {0} | Count: {1}" -f $_.Name, $_.Count) -ForegroundColor White
     }
+    
+    # Count of groups found inside SharePoint groups
+    $nestedGroupCount = ($global:Report | Where-Object { $_.SharePointGroupContainer -ne $null }).Count
+    Write-Host "`nEntra ID/Security groups found inside SharePoint groups: $nestedGroupCount" -ForegroundColor Green
+    
+    # Report on excluded system principals
+    $systemPrincipalCount = ($global:Report | Where-Object { $_.IsSystemPrincipal }).Count
+    Write-Host "Excluded system principals: $systemPrincipalCount instances" -ForegroundColor Yellow
 }
 
 # --- Optionally save the detailed report to CSV ---
