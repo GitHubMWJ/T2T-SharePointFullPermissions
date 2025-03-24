@@ -427,7 +427,12 @@ if ($global:Report.Count -eq 0) {
                 $groupTypeObj = $group.Group | Select-Object -First 1
                 $groupType = $groupTypeObj.GroupType
                 
-                Write-Host ("  • {0} ({1}) ({2} instances)" -f $groupName, $groupType, $group.Group.Count) -ForegroundColor White
+                # UPDATED: Improved formatting with color-coding for clearer distinction
+                Write-Host "  • Group: " -NoNewline -ForegroundColor White
+                Write-Host "'$groupName'" -NoNewline -ForegroundColor Yellow
+                Write-Host " | Type: " -NoNewline -ForegroundColor White
+                Write-Host $groupType -NoNewline -ForegroundColor Cyan
+                Write-Host " | $($group.Group.Count) instances" -ForegroundColor White
                 
                 # Now list all the locations where this group is found
                 foreach ($location in $group.Group) {
