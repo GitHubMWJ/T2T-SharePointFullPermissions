@@ -42,6 +42,7 @@ During tenant migrations, understanding how groups are applied across your Share
 | 🔍 **Comprehensive Discovery** | Scans site collections, subsites, and lists with unique permissions |
 | 🏷️ **Group Classification** | Correctly identifies different group types (M365 Groups, Security Groups, SharePoint Groups) |
 | 🔐 **Permission Mapping** | Reports which permission levels are assigned to each group |
+| 📑 **Multiple Site Input Methods** | Scan sites via manual URL entry, CSV import, or tenant-level scan |
 | ⚡ **Recon Mode** | Provides a quick overview of the environment size before performing the full scan |
 | 🧪 **Test Mode** | Allows testing against a single site before scanning the entire tenant |
 | 📊 **Visual Progress** | Uses color-coded output and progress bars to track scanning progress |
@@ -53,10 +54,10 @@ During tenant migrations, understanding how groups are applied across your Share
 
 - PowerShell 5.1 or higher
 - [PnP.PowerShell](https://pnp.github.io/powershell/) module installed
-- An app registration in Azure AD with the following permissions:
-  - **Microsoft Graph API**: `Sites.Read.All`, `Group.Read.All`
+- An app registration in Entra ID with:
   - **SharePoint**: `Sites.FullControl.All`
-- An account with read access to all SharePoint sites in the tenant
+- Your Entra ID tenant ID (GUID format)
+- An account with read access to the SharePoint sites you want to scan
 
 ## 💻 Installation
 
@@ -66,9 +67,9 @@ During tenant migrations, understanding how groups are applied across your Share
 Install-Module -Name "PnP.PowerShell" -Force
 ```
 
-2. Download the `Report-EntraGroupPermissions.ps1` script to your local machine.
+2. Download the `SharePoint-EntraGroupsScanner-Full.ps1` script to your local machine.
 
-3. Ensure you have your Azure AD App Registration ClientID ready.
+3. Ensure you have your Entra ID App Registration ClientID and Tenant ID ready.
 
 ## 🚀 Usage
 
@@ -79,20 +80,26 @@ Install-Module -Name "PnP.PowerShell" -Force
 ```
 
 2. When prompted, enter:
-   - Your ClientID (Application ID) from your Azure AD App Registration
+   - The PnP PowerShell Application ID (ClientID of your registered app in Entra ID)
+   - Your Tenant ID (e.g., `12345678-1234-1234-1234-123456789012`)
    - Your tenant admin URL (e.g., `https://yourtenant-admin.sharepoint.com`)
 
-3. The script will first perform a recon scan to count site collections, subsites, and lists.
+3. Select how you want to provide site URLs:
+   - Enter URLs manually (comma-separated)
+   - Import from a CSV file (with a column named 'Url' or 'URL')
+   - Try tenant-level scan via PnP (requires SharePoint Admin permissions)
 
-4. After reviewing the recon scan results, choose whether to proceed with the full scan.
+4. The script will first perform a recon scan to count site collections, subsites, and lists.
 
-5. Optionally enable test mode to scan just a single site.
+5. After reviewing the recon scan results, choose whether to proceed with the full scan.
 
-6. Review the results in the console, including:
+6. Optionally enable test mode to scan just a single site.
+
+7. Review the results in the console, including:
    - A summary of discovered group assignments
    - A breakdown of group types found
 
-7. Optionally export the detailed findings to a CSV file.
+8. Optionally export the detailed findings to a CSV file.
 
 ## ⚙️ How It Works
 
@@ -100,33 +107,42 @@ The script operates in several phases:
 
 ```mermaid
 graph TD
-    A[Connection to Tenant] --> B[Recon Scan]
-    B --> C{Proceed with full scan?}
-    C -->|Yes| D[Full Scan]
-    C -->|No| H[Exit]
-    D --> E[Process Sites]
-    E --> F[Process Subsites]
-    F --> G[Process Lists]
-    E --> I[Identify Groups & Permissions]
-    F --> I
-    G --> I
-    I --> J[Generate Report]
-    J --> K[Export CSV]
+    A[Connection with Client & Tenant IDs] --> B[Site Collection Input Methods]
+    B -->|Manual URLs| C[Site List]
+    B -->|CSV Import| C
+    B -->|PnP Tenant Scan| C
+    C --> D[Recon Scan]
+    D --> E{Proceed with full scan?}
+    E -->|Yes| F[Full Scan]
+    E -->|No| K[Exit]
+    F --> G[Process Sites]
+    G --> H[Process Subsites]
+    H --> I[Process Lists]
+    G --> J[Identify Groups & Permissions]
+    H --> J
+    I --> J
+    J --> L[Generate Report]
+    L --> M[Export CSV]
 ```
 
-1. **Connection**: Uses PnP PowerShell to connect to your tenant admin site with your provided ClientID.
+1. **Connection**: Uses PnP PowerShell to connect to your tenant admin site with your provided ClientID and Tenant ID.
 
-2. **Recon Scan**: Quickly counts all site collections, subsites, and lists in your environment to give you an overview of the scope.
+2. **Site Collection Input**: Provides multiple ways to specify which sites to scan:
+   - Manual entry of comma-separated URLs
+   - Import from a CSV file
+   - PnP tenant-level scan (requires SharePoint Admin permissions)
 
-3. **Full Scan (if approved)**: 
-   - Processes each site collection in the tenant (excluding OneDrive sites)
+3. **Recon Scan**: Quickly counts all site collections, subsites, and lists in your environment to give you an overview of the scope.
+
+4. **Full Scan (if approved)**: 
+   - Processes each site collection in the provided list
    - For each site, retrieves all role assignments and identifies group principals
    - Examines lists with unique permissions to find group assignments
    - Recursively processes all subsites using the same approach
    - Collects information about the groups, their types, and permission levels
    - Inspects SharePoint groups to find nested Entra ID groups
 
-4. **Reporting**: Provides a color-coded summary of findings in the console and optionally exports detailed data to CSV.
+5. **Reporting**: Provides a color-coded summary of findings in the console and optionally exports detailed data to CSV.
 
 ## 📝 Output Explanation
 
@@ -187,7 +203,7 @@ The script counts these excluded principals separately in the summary statistics
 <summary><b>Authentication Failed</b></summary>
 <ul>
 <li>Ensure your App Registration has the correct permissions</li>
-<li>Check that the ClientID is entered correctly</li>
+<li>Check that the ClientID and Tenant ID are entered correctly</li>
 <li>Make sure you have access to the tenant admin site</li>
 </ul>
 </details>
@@ -219,12 +235,22 @@ The script counts these excluded principals separately in the summary statistics
 </ul>
 </details>
 
+<details>
+<summary><b>CSV Import Issues</b></summary>
+<ul>
+<li>Ensure your CSV file has a column named 'Url' or 'URL'</li>
+<li>Check that all URLs in the CSV are valid SharePoint site URLs</li>
+<li>Verify the file path to your CSV is correct</li>
+</ul>
+</details>
+
 ## ⚠️ Limitations
 
 - The script doesn't report on individual user permissions, only groups
 - Nested group memberships beyond the first level are not expanded (e.g., if a Security Group is a member of another Security Group)
 - Performance may be affected in very large tenants with thousands of sites
 - The script doesn't report item-level permissions, only site, subsite and list-level permissions
+- Using delegated permissions with Graph API is not supported for comprehensive site collection discovery
 
 ## 📄 License
 
