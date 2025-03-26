@@ -203,8 +203,11 @@ function Process-Web {
 
     try {
         # Connect to the site - this is crucial as we need a fresh connection for each site
-        # Updated to include tenant ID parameter
-        Connect-PnPOnline -Url $WebUrl -Interactive -ClientId $clientId -Tenant $tenantId -PersistLogin -ErrorAction Stop
+        # Create web-specific connection params
+        $webConnectionParams = $connectionParams.Clone()
+        $webConnectionParams["Url"] = $WebUrl
+        
+        Connect-PnPOnline @webConnectionParams -ErrorAction Stop
         
         # Get the web object with all properties we need
         $web = Get-PnPWeb -Includes RoleAssignments, Title, HasUniqueRoleAssignments
@@ -406,14 +409,31 @@ function Process-Web {
 # --- Ask user for required variables and explain them ---
 $clientId = Read-Host -Prompt `
     "Enter the PnP PowerShell Application ID (ClientID of your registered app in Entra ID)"
-$tenantId = Read-Host -Prompt `
-    "Enter your Tenant ID (e.g., 12345678-1234-1234-1234-123456789012)"
+
+# Display colored prompt for Tenant ID to highlight optional nature
+Write-Host "Enter your Tenant ID " -NoNewline
+Write-Host "(OPTIONAL" -ForegroundColor Cyan -NoNewline
+Write-Host " for member accounts, required for guest accounts): " -NoNewline
+$tenantId = Read-Host
+
 $tenantAdminUrl = Read-Host -Prompt `
     "Enter your Tenant Admin URL (e.g., https://yourtenant-admin.sharepoint.com)"
 
+# --- Set up connection parameters with splatting ---
+$connectionParams = @{
+    Url = $tenantAdminUrl
+    Interactive = $true
+    ClientId = $clientId
+    PersistLogin = $true
+}
+# Only add tenant parameter if it's provided
+if (-not [string]::IsNullOrEmpty($tenantId)) {
+    $connectionParams["Tenant"] = $tenantId
+}
+
 # --- Connect to the Tenant Admin site using PnP Interactive Login ---
 Write-Host "Connecting to Tenant Admin site..." -ForegroundColor Cyan
-Connect-PnPOnline -Url $tenantAdminUrl -Interactive -ClientId $clientId -Tenant $tenantId -PersistLogin
+Connect-PnPOnline @connectionParams
 
 # --- Site Collection Input: Allow multiple input methods based on available permissions ---
 Write-Host "`nGet Site Collections to scan..." -ForegroundColor Magenta
@@ -529,7 +549,11 @@ foreach ($site in $allSites) {
         -Status ("Processing site {0} of {1}: {2}" -f $siteIndex, $totalSites, $site.Url) `
         -PercentComplete (($siteIndex / $totalSites) * 100)
     try {
-        Connect-PnPOnline -Url $site.Url -Interactive -ClientId $clientId -Tenant $tenantId -PersistLogin -ErrorAction Stop | Out-Null
+        # Create site-specific connection params by cloning the base params
+        $siteConnectionParams = $connectionParams.Clone()
+        $siteConnectionParams["Url"] = $site.Url
+        
+        Connect-PnPOnline @siteConnectionParams -ErrorAction Stop | Out-Null
         $web = Get-PnPWeb
         $subWebs = Get-PnPSubWeb -Recurse
         $totalSubsites += $subWebs.Count
