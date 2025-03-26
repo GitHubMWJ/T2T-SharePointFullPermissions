@@ -13,6 +13,22 @@ if (-not (Get-Module -Name "PnP.PowerShell")) {
     Import-Module PnP.PowerShell -DisableNameChecking -ErrorAction Stop
 }
 
+# --- Check for Microsoft Graph PowerShell modules (informational only) ---
+$graphModulesRequired = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Sites")
+$missingModules = @()
+
+foreach ($module in $graphModulesRequired) {
+    if (-not (Get-Module -ListAvailable -Name $module)) {
+        $missingModules += $module
+    }
+}
+
+$graphAvailable = $missingModules.Count -eq 0
+if (-not $graphAvailable) {
+    Write-Host "Note: Microsoft Graph PowerShell modules are not installed." -ForegroundColor Yellow
+    Write-Host "      These modules may be useful for other SharePoint administration tasks." -ForegroundColor Yellow
+}
+
 # --- Global variable to hold the report data ---
 $global:Report = @()
 
@@ -40,6 +56,61 @@ $systemPrincipals = @(
     "Application Administrator",
     "Global Reader"
 )
+
+# --- Function: Test Graph API Permissions ---
+function Test-GraphPermissionWithPnP {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TenantAdminUrl,
+        [Parameter(Mandatory = $true)]
+        [string]$ClientId,
+        [Parameter(Mandatory = $true)]
+        [string]$TenantId
+    )
+    
+    try {
+        # Make sure we're connected to SharePoint admin site
+        Connect-PnPOnline -Url $TenantAdminUrl -Interactive -ClientId $ClientId -Tenant $TenantId -PersistLogin -ErrorAction Stop
+        
+        # Try to get a token from the current PnP connection (no resource parameter needed)
+        Write-Host "Testing Graph API access..." -ForegroundColor Cyan
+        $accessToken = Get-PnPAccessToken -ErrorAction Stop
+        
+        # Create headers for a test request
+        $headers = @{
+            "Authorization" = "Bearer $accessToken"
+            "Content-Type" = "application/json"
+        }
+        
+        # Make a minimal test request - just get a single site
+        $response = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites?`$top=1" -Headers $headers -Method Get -ErrorAction Stop
+        
+        # If we get here, permissions are working
+        if ($response.value -and $response.value.Count -gt 0) {
+            Write-Host "✓ Graph API access confirmed: Successfully retrieved site data" -ForegroundColor Green
+            return $true
+        } else {
+            Write-Host "? Graph API access seems okay but returned no sites" -ForegroundColor Yellow
+            return $true  # Still return true as the API worked, just no data
+        }
+    }
+    catch {
+        # Check specific error types
+        if ($_ -match "Forbidden" -or $_ -match "Access denied" -or $_ -match "Authorization_RequestDenied") {
+            Write-Host "✗ Graph API access denied: The application '$ClientId' doesn't have 'Sites.Read.All' permission" -ForegroundColor Red
+            Write-Host "  This permission must be added in Entra ID and admin consent granted" -ForegroundColor Yellow
+            return $false
+        }
+        elseif ($_ -match "invalid_resource" -or $_ -match "AADSTS500011") {
+            Write-Host "✗ Graph API access error: Resource not registered for this application" -ForegroundColor Red
+            return $false
+        }
+        else {
+            Write-Host "✗ Graph API access error: $_" -ForegroundColor Red
+            return $false
+        }
+    }
+}
 
 # --- Function: Process-SharePointGroup ---
 # Processes a SharePoint group to find Entra ID groups inside it
@@ -132,7 +203,8 @@ function Process-Web {
 
     try {
         # Connect to the site - this is crucial as we need a fresh connection for each site
-        Connect-PnPOnline -Url $WebUrl -Interactive -ClientId $clientId -PersistLogin -ErrorAction Stop
+        # Updated to include tenant ID parameter
+        Connect-PnPOnline -Url $WebUrl -Interactive -ClientId $clientId -Tenant $tenantId -PersistLogin -ErrorAction Stop
         
         # Get the web object with all properties we need
         $web = Get-PnPWeb -Includes RoleAssignments, Title, HasUniqueRoleAssignments
@@ -333,20 +405,120 @@ function Process-Web {
 
 # --- Ask user for required variables and explain them ---
 $clientId = Read-Host -Prompt `
-    "Enter your ClientID (Application ID) for authentication (required for PnP Interactive Login)"
+    "Enter the PnP PowerShell Application ID (ClientID of your registered app in Entra ID)"
+$tenantId = Read-Host -Prompt `
+    "Enter your Tenant ID (e.g., 12345678-1234-1234-1234-123456789012)"
 $tenantAdminUrl = Read-Host -Prompt `
     "Enter your Tenant Admin URL (e.g., https://yourtenant-admin.sharepoint.com)"
 
 # --- Connect to the Tenant Admin site using PnP Interactive Login ---
 Write-Host "Connecting to Tenant Admin site..." -ForegroundColor Cyan
-Connect-PnPOnline -Url $tenantAdminUrl -Interactive -ClientId $clientId -PersistLogin
+Connect-PnPOnline -Url $tenantAdminUrl -Interactive -ClientId $clientId -Tenant $tenantId -PersistLogin
 
-# --- Recon Scan: Count all site collections, subsites, and lists ---
-Write-Host "`nStarting Recon Scan to count sites, subsites, and lists..." `
-    -ForegroundColor Magenta
-$allSites = Get-PnPTenantSite -Detailed -IncludeOneDriveSites:$false
+# --- Site Collection Input: Allow multiple input methods based on available permissions ---
+Write-Host "`nGet Site Collections to scan..." -ForegroundColor Magenta
+
+# Build the menu options
+$menuOptions = @"
+How would you like to provide site URLs? (Enter number)
+1. Enter URLs manually (comma-separated)
+2. Import from a CSV file
+3. Try tenant-level scan via PnP (requires SharePoint Admin permissions)
+"@
+
+$inputMethod = Read-Host -Prompt $menuOptions
+
+$allSites = @()
+
+switch ($inputMethod) {
+    "1" {
+        $siteUrls = Read-Host -Prompt "Enter comma-separated site collection URLs (e.g., https://tenant.sharepoint.com/sites/site1,https://tenant.sharepoint.com/sites/site2)"
+        $urlList = $siteUrls -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+        
+        foreach ($url in $urlList) {
+            $allSites += [PSCustomObject]@{
+                Url = $url
+            }
+        }
+    }
+    "2" {
+        $csvPath = Read-Host -Prompt "Enter path to CSV file containing site URLs (should have a column named 'Url' or 'URL')"
+        if (Test-Path $csvPath) {
+            $importedSites = Import-Csv -Path $csvPath
+            
+            # Check for the URL column name (either Url or URL)
+            $urlColumnName = if ($importedSites[0].PSObject.Properties.Name -contains "Url") { "Url" } 
+                            elseif ($importedSites[0].PSObject.Properties.Name -contains "URL") { "URL" }
+                            else { $null }
+            
+            if ($urlColumnName) {
+                foreach ($site in $importedSites) {
+                    $allSites += [PSCustomObject]@{
+                        Url = $site.$urlColumnName
+                    }
+                }
+            } else {
+                Write-Host "Error: CSV doesn't have a 'Url' or 'URL' column. Please check the format." -ForegroundColor Red
+                exit
+            }
+        } else {
+            Write-Host "Error: CSV file not found at specified path." -ForegroundColor Red
+            exit
+        }
+    }
+    "3" {
+        Write-Host "Attempting tenant-level scan via PnP. This may fail if you don't have sufficient permissions..." -ForegroundColor Yellow
+        try {
+            $allSites = Get-PnPTenantSite -Detailed -IncludeOneDriveSites:$false -ErrorAction Stop
+        }
+        catch {
+            Write-Host "Error in tenant scan: $_" -ForegroundColor Red
+            Write-Host "Falling back to manual input..." -ForegroundColor Yellow
+            
+            $siteUrls = Read-Host -Prompt "Enter comma-separated site collection URLs (e.g., https://tenant.sharepoint.com/sites/site1,https://tenant.sharepoint.com/sites/site2)"
+            $urlList = $siteUrls -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+            
+            foreach ($url in $urlList) {
+                $allSites += [PSCustomObject]@{
+                    Url = $url
+                }
+            }
+        }
+    }
+    "4" {
+        Write-Host "Invalid choice. Defaulting to manual input." -ForegroundColor Yellow
+        $siteUrls = Read-Host -Prompt "Enter comma-separated site collection URLs (e.g., https://tenant.sharepoint.com/sites/site1,https://tenant.sharepoint.com/sites/site2)"
+        $urlList = $siteUrls -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+        
+        foreach ($url in $urlList) {
+            $allSites += [PSCustomObject]@{
+                Url = $url
+            }
+        }
+    }
+    default {
+        Write-Host "Invalid choice. Defaulting to manual input." -ForegroundColor Yellow
+        $siteUrls = Read-Host -Prompt "Enter comma-separated site collection URLs (e.g., https://tenant.sharepoint.com/sites/site1,https://tenant.sharepoint.com/sites/site2)"
+        $urlList = $siteUrls -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+        
+        foreach ($url in $urlList) {
+            $allSites += [PSCustomObject]@{
+                Url = $url
+            }
+        }
+    }
+}
 
 $totalSites = $allSites.Count
+if ($totalSites -eq 0) {
+    Write-Host "No sites to scan. Exiting..." -ForegroundColor Red
+    exit
+}
+
+# --- Recon Scan: Count subsites and lists for the provided site collections ---
+Write-Host "`nStarting Recon Scan to count subsites and lists for $totalSites site collections..." `
+    -ForegroundColor Magenta
+
 $totalSubsites = 0
 $totalLists = 0
 
@@ -357,7 +529,7 @@ foreach ($site in $allSites) {
         -Status ("Processing site {0} of {1}: {2}" -f $siteIndex, $totalSites, $site.Url) `
         -PercentComplete (($siteIndex / $totalSites) * 100)
     try {
-        Connect-PnPOnline -Url $site.Url -Interactive -ClientId $clientId -PersistLogin | Out-Null
+        Connect-PnPOnline -Url $site.Url -Interactive -ClientId $clientId -Tenant $tenantId -PersistLogin -ErrorAction Stop | Out-Null
         $web = Get-PnPWeb
         $subWebs = Get-PnPSubWeb -Recurse
         $totalSubsites += $subWebs.Count
